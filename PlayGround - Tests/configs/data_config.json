@@ -1,0 +1,7 @@
+{
+    "docs_path": "LLM_testing/documents/",
+    "recursive_mode": "False",
+    "process_images": "True",
+    "databases_path": "LLM_testing/vector_databases/",
+    "embedding_model_name": "paraphrase-multilingual-mpnet-base-v2"
+}

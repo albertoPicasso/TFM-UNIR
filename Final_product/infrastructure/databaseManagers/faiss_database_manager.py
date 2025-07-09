@@ -1,0 +1,164 @@
+from interfaces.databaseManager import Database_manager
+from langchain_core.documents import Document
+from pathlib import Path
+from langchain_community.vectorstores import FAISS
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers import EnsembleRetriever
+from pathlib import Path
+import pandas as pd
+import os
+import csv
+import re
+
+
+class Faiss_database_manager(Database_manager):
+    """
+    Manages document embedding storage and retrieval using a vector database.
+
+    This class provides functionality to generate, store, and retrieve document embeddings
+    using a Chroma-based vector database. It allows for efficient similarity searches and
+    ensures proper preprocessing of documents before indexing.
+
+    Key Features:
+    - Converts documents into embeddings and stores them in a vector database.
+    - Prevents overwriting existing databases to ensure data integrity.
+    - Supports similarity-based retrieval of documents for contextual search.
+    - Implements reranking for improved result relevance.
+    """
+
+
+    def __init__(self, model_name: str, work_directory:str):
+        super().__init__(work_directory, model_name)
+
+
+
+    def create (self, documents: list[list[Document]], database_name:str) -> None:
+        """
+        Generate and store document embeddings in a vector database.
+
+        This method processes a list of documents, converts them into embeddings, and
+        stores them in a Chroma vector database. If a database with the given name already
+        exists, an exception is raised to prevent overwriting.
+
+        :param documents: A nested list where each sublist contains pages of a document.
+        :type documents: list[list[Document]]
+        :param database_name: Name of the database to be created, defaults to "test1.db".
+        :type database_name: str, optional
+        :raises FileExistsError: If a database with the specified name already exists.
+        """
+
+        database_path = self.work_directory + database_name
+
+
+        path = Path(database_path)
+        if path.exists() and any(path.iterdir()):
+            raise FileExistsError("The database already exists in current workspace (folder is not empty).")
+
+        else:
+            docs = []
+
+            for i, doc in enumerate(documents):
+                for j, page in enumerate(doc):
+                    docs.append(self._preprocess_document(page, num_doc=i, num_page=j ))
+
+            vector_store = FAISS.from_documents(
+                    documents=docs,
+                    embedding=self.embedding_model)
+            vector_store.save_local(database_path)
+
+
+
+    def get_context(self, query_text: str, database_name: str, k: int = 10) -> list:
+        """
+        Retrieve the top K most relevant documents using an Ensemble Retriever (BM25 + FAISS).
+
+        Combines lexical (BM25) and semantic (FAISS) retrievers to enhance retrieval quality.
+        Results are optionally reranked for improved relevance.
+
+        :param database_name: Name of the database to search in.
+        :type database_name: str
+        :param query_text: The input query used for retrieval.
+        :type query_text: str
+        :param k: Number of top relevant documents to retrieve, defaults to 10.
+        :type k: int, optional
+        :return: A list of tuples containing the retrieved documents and their scores.
+        :rtype: list
+        :raises FileExistsError: If the specified database does not exist.
+        """
+
+
+        database_path = self.work_directory + database_name
+        path = Path(database_path)
+
+        if not path.exists() or not any(path.iterdir()):
+            raise FileExistsError("The database doesn't exist or the directory is empty in the current workspace.")
+
+        # Load FAISS vector store
+        vector_store = FAISS.load_local(
+            folder_path=database_path,
+            embeddings=self.embedding_model,
+            allow_dangerous_deserialization=True
+        )
+
+        # FAISS retriever
+        faiss_retriever = vector_store.as_retriever(search_kwargs={"k": k})
+
+        # BM25 retriever from documents
+        documents = list(vector_store.docstore._dict.values())
+        bm25_retriever = BM25Retriever.from_documents(documents)
+        bm25_retriever.k = k
+
+        # Combine with EnsembleRetriever
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, faiss_retriever],
+            weights=[0.5, 0.5]
+        )
+
+        # Use `.invoke()` instead of deprecated `.get_relevant_documents()`
+        retrieved_docs = ensemble_retriever.invoke(query_text)
+
+        # Optional reranking (if method expects scores, fake them)
+        results = [(doc, 0.0) for doc in retrieved_docs]
+        results = self._rerank_documents(results)
+
+        return results[:k]
+
+
+    def _rerank_documents(self, context:list, distance_threshold:float = 6.5) -> list:
+
+        """
+        Rerank context retrieved using L2 distance given by database
+
+        Return an Ordered and filtered context tuple(score, document) by distance and threshold
+        """
+
+        sorted_results = sorted(context, key=lambda x: x[1], reverse=True)
+        filtered_results = list(filter(lambda x: x[1] <= distance_threshold, sorted_results))
+        return filtered_results
+        """
+        for res, score in results:
+            print(f"* [Distance = {score:3f}] {res.page_content} [{res.metadata}]")
+        """
+
+
+
+
+    def _preprocess_document(self, doc: Document, num_doc:int, num_page:int) -> Document:
+
+        """
+            Clean unnecessary metadata and assing an unique ID
+            ID = Document * 10000 + page number = Document 3 page number 5 = 30005
+                                                  Document 0 page 0 = 0
+        """
+
+        metadata = {}
+
+        source_file = doc.metadata['source'].split('\\')[-1]
+        #page_label = doc.metadata['page_label']
+
+        metadata['title'] = source_file
+        #metadata['page_label'] = page_label
+
+        doc.metadata = metadata
+        doc.id = str((num_doc*10000) + num_page)
+        return doc

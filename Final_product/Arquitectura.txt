@@ -1,0 +1,25 @@
+Clean / Hexagonal architecture
+app/
+│
+├── main.py
+│
+├── controllers/
+│   └── update_controller.py
+│
+├── services/
+│   └── update_service.py
+│
+├── interfaces/               # <- Tus abstracciones
+│   └── db_repository.py
+│
+├── infrastructure/           # <- Implementaciones concretas
+│   └── db/
+│       └── mongo_repository.py
+│   └── models/
+│       └── huggingface_loader.py
+│
+├── factories/                # <- Instanciadores concretos
+│   └── repository_factory.py
+│
+└── utils/
+    └── logger.py
