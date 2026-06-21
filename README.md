@@ -9,6 +9,66 @@ Trabajo de Fin de Máster (UNIR). Sistema de chatbot educativo basado en **Retri
 El sistema sigue una **arquitectura por capas** con separación entre lógica de negocio e infraestructura.
 
 ```
+┌──────────────────────────────────────────────────────────────────┐
+│                        PRESENTACIÓN                              │
+│                                                                  │
+│   ┌─────────────────────────┐   ┌───────────────────────────┐   │
+│   │     FastAPI REST API    │   │      Streamlit UI         │   │
+│   │  /getAnswer             │   │  Panel alumno             │   │
+│   │  /replaceContent        │   │  Panel admin              │   │
+│   └────────────┬────────────┘   └───────────────────────────┘   │
+└────────────────│─────────────────────────────────────────────────┘
+                 │
+┌────────────────▼─────────────────────────────────────────────────┐
+│                       CONTROLADORES                              │
+│                                                                  │
+│   ┌──────────────────────────┐   ┌────────────────────────────┐  │
+│   │    AnswerController      │   │    UpdateController        │  │
+│   │  classify → retrieve     │   │  load → split → index      │  │
+│   │         → generate       │   │                            │  │
+│   └──────────────┬───────────┘   └──────────────┬─────────────┘  │
+└──────────────────│──────────────────────────────│────────────────┘
+                   │                              │
+┌──────────────────▼──────────────────────────────▼────────────────┐
+│                         SERVICIOS                                │
+│                                                                  │
+│  ┌────────────────────────┐  ┌────────────────────────────────┐  │
+│  │  RewriteClassifyService│  │    RegularUpdateService        │  │
+│  │  clasifica y reformula │  │    (teoria / info)             │  │
+│  └───────────┬────────────┘  └────────────────────────────────┘  │
+│              │                                                   │
+│  ┌───────────▼────────────┐  ┌────────────────────────────────┐  │
+│  │    AnswerService       │  │    PractiseUpdateService       │  │
+│  │  regular / practical   │  │    (summary tree JSON)         │  │
+│  └────────────────────────┘  └────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+                   │                              │
+┌──────────────────▼──────────────────────────────▼────────────────┐
+│                      INFRAESTRUCTURA                             │
+│                                                                  │
+│  ┌──────────────────────┐  ┌───────────────┐  ┌──────────────┐  │
+│  │   FAISS / Chroma     │  │  Universal    │  │    Text      │  │
+│  │   DatabaseManager    │  │  DocumentLoad │  │   Splitter   │  │
+│  │  BM25 + FAISS        │  │  PDF/TXT/     │  │  chunk=1500  │  │
+│  │  ensemble + rerank   │  │  .py / URL    │  │  overlap=500 │  │
+│  └──────────────────────┘  └───────────────┘  └──────────────┘  │
+└──────────────────────────────────────────────────────────────────┘
+                   │
+┌──────────────────▼────────────────────────────────────────────────┐
+│                    CAPA DE MODELOS (LLM)                          │
+│                                                                   │
+│   LLMTool  ←  LLMFactory                                         │
+│                                                                   │
+│   ┌────────────┐   ┌───────────────┐   ┌──────────────────────┐  │
+│   │   OpenAI   │   │  Together.ai  │   │    HuggingFace       │  │
+│   │ GPT-4o-mini│   │ LLaMA / Mistr │   │  (local pipeline)   │  │
+│   └────────────┘   └───────────────┘   └──────────────────────┘  │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+### Estructura de directorios
+
+```
 Final_product/
 ├── main.py                          # Punto de entrada + argparse
 ├── API/
@@ -57,14 +117,25 @@ Data Analisis/      # Scripts de análisis y gráficas comparativas
 ### Ingesta de documentos (`--update`)
 
 ```
-content/
-├── teoria/       →  RecursiveCharacterTextSplitter (chunk=1500, overlap=500)
-│                    → embeddings paraphrase-multilingual-mpnet-base-v2
-│                    → FAISS / ChromaDB  →  database/teoria/
-├── info/         →  ídem  →  database/info/
-└── practica/     →  LLM genera resumen de cada fichero
-                     → summary_tree.json (árbol JSON con resúmenes)
-                     →  database/practica/summary_tree.json
+  content/teoria/          content/info/            content/practica/
+  PDF · TXT · .py          PDF · TXT · .py          PDF · TXT · .py
+        │                        │                        │
+        ▼                        ▼                        ▼
+  DocumentLoader           DocumentLoader           DocumentLoader
+  (recursive=False)        (recursive=False)        (recursive=True)
+        │                        │                        │
+        ▼                        ▼                        ▼
+  TextSplitter             TextSplitter             merge_pages()
+  chunk=1500               chunk=1500               (1 doc por fichero)
+  overlap=500              overlap=500                    │
+        │                        │                        ▼
+        ▼                        ▼               LLM genera resumen
+  Embeddings               Embeddings            pedagógico por fichero
+  (mpnet-base-v2)          (mpnet-base-v2)                │
+        │                        │                        ▼
+        ▼                        ▼               summary_tree.json
+  FAISS / Chroma           FAISS / Chroma        (árbol JSON con resúmenes)
+  database/teoria/         database/info/         database/practica/
 ```
 
 Formatos soportados: `.pdf`, `.txt`, `.py`, `.url`.
@@ -72,32 +143,70 @@ Formatos soportados: `.pdf`, `.txt`, `.py`, `.url`.
 ### Flujo de respuesta (`POST /tfm/service/getAnswer`)
 
 ```
-Historial conversación
-        │
-        ▼
-RewriteClassifyService   ← LLM (classifier)
-  • reformula la pregunta añadiendo contexto del historial
-  • clasifica en: teoria | informacion | practica | irrelevante
-        │
-        ├─ teoria / informacion
-        │       │
-        │       ▼
-        │   EnsembleRetriever (BM25 50% + FAISS 50%, k=10)
-        │   + reranking por distancia L2 (umbral 6.5)
-        │       │
-        │       ▼
-        │   AnswerService.regular_answer  ← LLM (answer)
-        │
-        ├─ practica
-        │       │
-        │       ▼
-        │   LLM selecciona ficheros relevantes desde summary_tree.json
-        │   → carga documentos seleccionados
-        │       │
-        │       ▼
-        │   AnswerService.practical_answer  ← LLM (answer)
-        │
-        └─ irrelevante  →  respuesta de rechazo fija
+                   Cliente (Streamlit / curl / cualquier HTTP)
+                                      │
+                          POST /tfm/service/getAnswer
+                          { "messages": [ {role, content}, ... ] }
+                                      │
+                                      ▼
+                             AnswerController.launch()
+                                      │
+                   ┌──────────────────▼──────────────────┐
+                   │        RewriteClassifyService        │
+                   │          LLM  (classifier)           │
+                   │                                      │
+                   │  Entrada: historial completo         │
+                   │  ┌────────────────────────────────┐  │
+                   │  │ Separa mensajes del usuario    │  │
+                   │  │ Último mensaje  → pregunta     │  │
+                   │  │ Mensajes previos → contexto    │  │
+                   │  └────────────────────────────────┘  │
+                   │                                      │
+                   │  Salidas:                            │
+                   │  • pregunta reformulada (autónoma)   │
+                   │  • categoría clasificada             │
+                   └────────────┬─────────────────────────┘
+                                │
+      ┌───────────────────────┼───────────────────────┐
+      │                       │                       │
+      ▼                       ▼                       ▼
+ "teoria" /             "practica"             "irrelevante"
+ "informacion"               │                       │
+      │                       │                       ▼
+      │               database/practica/        Respuesta fija
+      │               summary_tree.json         de rechazo
+      │                       │
+      ▼                       ▼
+ database/teoria/    ┌─────────────────────────┐
+ database/info/      │ LLM lee resúmenes del   │
+ (FAISS index)       │ árbol JSON y selecciona │
+      │              │ los ficheros relevantes  │
+      ▼              └────────────┬────────────┘
+ ┌─────────────────┐              │
+ │ EnsembleRetriev │              ▼
+ │                 │   Carga documentos reales
+ │  BM25    50%    │   de content/practica/
+ │  FAISS   50%    │              │
+ │  k = 10 chunks  │              ▼
+ └──────┬──────────┘   ┌──────────────────────┐
+        │              │ LLM genera respuesta │
+        ▼              │ basada en código     │
+ Reranking L2          │ fuente real          │
+ (umbral d=6.5)        └──────────┬───────────┘
+        │                         │
+        ▼                         │
+ ┌─────────────────┐              │
+ │ LLM genera      │              │
+ │ respuesta con   │              │
+ │ contexto        │              │
+ │ documental      │              │
+ └────────┬────────┘              │
+          │                       │
+          └───────────┬───────────┘
+                      │
+                      ▼
+          { "role": "assistant",
+            "content": "..." }
 ```
 
 ### Retrieval híbrido (teoria/info)
