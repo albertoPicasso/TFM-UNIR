@@ -1,6 +1,6 @@
 # TFM — Educational RAG Chatbot
 
-Trabajo de Fin de Máster (UNIR). Sistema de chatbot educativo basado en **Retrieval-Augmented Generation (RAG)** orientado a asignaturas de programación. Proporciona respuestas contextualizadas sobre teoría, información organizativa y ejercicios prácticos a partir de documentación del curso.
+Sistema de chatbot educativo basado en **Retrieval-Augmented Generation (RAG)** orientado a asignaturas de programación. Proporciona respuestas contextualizadas sobre teoría, información organizativa y ejercicios prácticos a partir de documentación del curso.
 
 ---
 
